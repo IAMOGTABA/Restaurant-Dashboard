@@ -6,40 +6,57 @@ const prisma = new PrismaClient();
 // GET /api/manager/staff-shifts - Get all active shifts
 export async function GET(request: NextRequest) {
   try {
-    // Get URL parameters
-    const searchParams = request.nextUrl.searchParams;
+    const { searchParams } = new URL(request.url);
     const staffId = searchParams.get('staffId');
-    const dateStr = searchParams.get('date');
     
-    // Convert date string to Date object or use current date
-    const date = dateStr ? new Date(dateStr) : new Date();
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
-    
-    // Build query filters
-    const whereClause: any = {
-      startTime: {
-        gte: startOfDay,
-        lte: endOfDay
-      }
-    };
-    
-    // Add staff filter if provided
-    if (staffId) {
-      whereClause.staffId = staffId;
+    if (!staffId) {
+      return NextResponse.json({ error: 'Staff ID is required' }, { status: 400 });
     }
     
-    // Get shifts from the database
+    console.log(`GET request for shifts with staffId: ${staffId}`);
+    
+    // First, check if this is actually a userId instead of a staffId
+    let actualStaffId = staffId;
+    
+    // Try to find a staff member by this ID
+    const staffDirectMatch = await prisma.staff.findUnique({
+      where: { id: staffId },
+      include: { user: true }
+    });
+    
+    // If not found, check if it's a userId
+    if (!staffDirectMatch) {
+      console.log(`No staff found with id ${staffId}, checking if it's a userId...`);
+      
+      const staffByUserId = await prisma.staff.findFirst({
+        where: { userId: staffId },
+        include: { user: true }
+      });
+      
+      if (staffByUserId) {
+        console.log(`Found staff by userId: ${staffByUserId.id} (${staffByUserId.user.name})`);
+        actualStaffId = staffByUserId.id;
+      } else {
+        return NextResponse.json({ 
+          error: 'Staff not found',
+          details: `No staff found with id: ${staffId}`
+        }, { status: 404 });
+      }
+    } else {
+      console.log(`Found staff directly: ${staffDirectMatch.id} (${staffDirectMatch.user.name})`);
+    }
+    
+    // Get the staff's shifts from the last 30 days
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    console.log(`Looking for shifts after ${thirtyDaysAgo.toISOString()} for staffId: ${actualStaffId}`);
+    
     const shifts = await prisma.shift.findMany({
-      where: whereClause,
-      include: {
-        staff: {
-          include: {
-            user: true
-          }
+      where: {
+        staffId: actualStaffId,
+        startTime: {
+          gte: thirtyDaysAgo
         }
       },
       orderBy: {
@@ -47,38 +64,63 @@ export async function GET(request: NextRequest) {
       }
     });
     
-    // Process shift data for frontend
-    const processedShifts = shifts.map(shift => {
-      // Calculate duration in minutes
-      let durationMinutes = 0;
-      if (shift.startTime && shift.endTime) {
-        durationMinutes = Math.round((shift.endTime.getTime() - shift.startTime.getTime()) / 60000);
-      }
-      
-      // Format duration as hours and minutes
-      const hours = Math.floor(durationMinutes / 60);
-      const minutes = durationMinutes % 60;
-      const durationStr = shift.endTime 
-        ? `${hours}h ${minutes}m` 
-        : 'In progress';
-      
-      return {
-        id: shift.id.toString(),
-        staffId: shift.staffId,
-        staffName: shift.staff?.user?.name || 'Unknown',
-        role: shift.staff?.position || 'Unknown',
-        status: shift.status,
-        startTime: shift.startTime,
-        endTime: shift.endTime,
-        duration: durationMinutes,
-        durationFormatted: durationStr
-      };
+    console.log(`Found ${shifts.length} shifts`);
+    
+    // Process shifts to prepare for calendar view
+    const formattedShifts = shifts.map(shift => ({
+      id: shift.id,
+      date: shift.startTime.toISOString().split('T')[0],
+      status: shift.status,
+      startTime: shift.startTime.toISOString(),
+      endTime: shift.endTime ? shift.endTime.toISOString() : null,
+      durationMs: shift.endTime ? new Date(shift.endTime).getTime() - new Date(shift.startTime).getTime() : null,
+      durationFormatted: shift.endTime ? formatDuration(new Date(shift.startTime), new Date(shift.endTime)) : 'In progress'
+    }));
+    
+    // Calculate attendance statistics
+    const totalShifts = shifts.length;
+    const presentShifts = shifts.filter(s => s.status === 'COMPLETED').length;
+    const lateShifts = shifts.filter(s => s.status === 'LATE').length;
+    const activeShifts = shifts.filter(s => s.status === 'ACTIVE').length;
+    
+    const attendanceRate = totalShifts > 0 ? Math.round((presentShifts / totalShifts) * 100) : 0;
+    
+    // Get the staff record we found (either direct match or by userId)
+    const staffRecord = staffDirectMatch || await prisma.staff.findFirst({
+      where: { userId: staffId },
+      include: { user: true }
     });
     
-    return NextResponse.json(processedShifts);
+    if (!staffRecord) {
+      return NextResponse.json({ 
+        error: 'Staff record not found',
+        details: 'Could not retrieve staff details' 
+      }, { status: 404 });
+    }
+    
+    return NextResponse.json({
+      staff: {
+        id: staffRecord.id,
+        userId: staffRecord.userId,
+        name: staffRecord.user.name,
+        role: staffRecord.position,
+        email: staffRecord.user.email
+      },
+      shifts: formattedShifts,
+      statistics: {
+        totalShifts,
+        presentShifts,
+        lateShifts,
+        activeShifts,
+        attendanceRate
+      }
+    });
   } catch (error) {
     console.error('Error fetching staff shifts:', error);
-    return NextResponse.json({ error: 'Failed to fetch staff shifts' }, { status: 500 });
+    return NextResponse.json({ 
+      error: 'Failed to fetch staff shifts',
+      details: error instanceof Error ? error.message : 'Unknown error' 
+    }, { status: 500 });
   }
 }
 
@@ -87,20 +129,63 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     
+    console.log("Received shift action request body:", body);
+    
     // Validate required fields
     if (!body.staffId) {
+      console.error("Missing staffId in request");
       return NextResponse.json({ error: 'Staff ID is required' }, { status: 400 });
     }
     
-    // Check if staff exists
-    const staff = await prisma.staff.findUnique({
-      where: { id: body.staffId }
-    });
-    
-    if (!staff) {
-      return NextResponse.json({ error: 'Staff not found' }, { status: 404 });
+    if (!body.action) {
+      console.error("Missing action in request");
+      return NextResponse.json({ error: 'Action (start/end) is required' }, { status: 400 });
     }
     
+    console.log(`Processing ${body.action} shift request for staffId: ${body.staffId}`);
+    
+    // Try to find staff record directly using staffId
+    let staffRecord = await prisma.staff.findUnique({
+      where: { id: body.staffId },
+      include: { user: true }
+    });
+    
+    // If not found directly, try to find by userId
+    if (!staffRecord) {
+      console.log(`No staff record found with id=${body.staffId}, checking if it's a userId...`);
+      
+      staffRecord = await prisma.staff.findFirst({
+        where: { userId: body.staffId },
+        include: { user: true }
+      });
+      
+      if (!staffRecord) {
+        console.error(`No staff found with staffId=${body.staffId} or userId=${body.staffId}`);
+        return NextResponse.json({ 
+          error: 'Staff not found',
+          details: `No staff record found for id: ${body.staffId}`
+        }, { status: 404 });
+      }
+      
+      console.log(`Found staff by userId: ${staffRecord.id} (${staffRecord.user.name})`);
+    } else {
+      console.log(`Found staff directly: ${staffRecord.id} (${staffRecord.user.name})`);
+    }
+    
+    // Call handleShiftAction with the confirmed staffId
+    return handleShiftAction(staffRecord.id, body.action);
+  } catch (error) {
+    console.error('Error in staff-shifts POST endpoint:', error);
+    return NextResponse.json({
+      error: 'Failed to process shift action',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 });
+  }
+}
+
+// Helper function to handle shift actions
+async function handleShiftAction(staffId, action) {
+  try {
     // Get current date
     const now = new Date();
     
@@ -112,10 +197,12 @@ export async function POST(request: NextRequest) {
     const endOfDay = new Date(now);
     endOfDay.setHours(23, 59, 59, 999);
     
+    console.log(`Looking for existing shifts for staffId ${staffId} between ${startOfDay.toISOString()} and ${endOfDay.toISOString()}`);
+    
     // Check if staff already has an active shift today
     const existingShift = await prisma.shift.findFirst({
       where: {
-        staffId: body.staffId,
+        staffId: staffId,
         startTime: {
           gte: startOfDay,
           lte: endOfDay
@@ -124,16 +211,21 @@ export async function POST(request: NextRequest) {
       }
     });
     
+    console.log(`Existing active shift found: ${existingShift ? 'Yes' : 'No'}`);
+    
     // If action is 'start' and there's no active shift, create a new one
-    if (body.action === 'start' && !existingShift) {
+    if (action === 'start' && !existingShift) {
+      console.log(`Creating new shift for staffId: ${staffId}`);
       const newShift = await prisma.shift.create({
         data: {
-          staffId: body.staffId,
+          staffId: staffId,
           startTime: now,
-          endTime: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+          endTime: null, // Don't set end time when starting
           status: 'ACTIVE'
         }
       });
+      
+      console.log(`New shift created with ID: ${newShift.id}`);
       
       return NextResponse.json({
         success: true,
@@ -143,7 +235,8 @@ export async function POST(request: NextRequest) {
     }
     
     // If action is 'end' and there's an active shift, update it
-    if (body.action === 'end' && existingShift) {
+    if (action === 'end' && existingShift) {
+      console.log(`Ending shift with ID: ${existingShift.id} for staffId: ${staffId}`);
       const updatedShift = await prisma.shift.update({
         where: { id: existingShift.id },
         data: {
@@ -151,6 +244,8 @@ export async function POST(request: NextRequest) {
           status: 'COMPLETED'
         }
       });
+      
+      console.log(`Shift updated: ${updatedShift.id}, new status: ${updatedShift.status}`);
       
       return NextResponse.json({
         success: true,
@@ -160,7 +255,8 @@ export async function POST(request: NextRequest) {
     }
     
     // If action is 'start' but shift already exists
-    if (body.action === 'start' && existingShift) {
+    if (action === 'start' && existingShift) {
+      console.log(`Staff already has an active shift: ${existingShift.id}`);
       return NextResponse.json({
         success: false,
         message: 'Staff already has an active shift',
@@ -169,7 +265,8 @@ export async function POST(request: NextRequest) {
     }
     
     // If action is 'end' but no active shift exists
-    if (body.action === 'end' && !existingShift) {
+    if (action === 'end' && !existingShift) {
+      console.log(`No active shift found for staffId: ${staffId}`);
       return NextResponse.json({
         success: false,
         message: 'No active shift found for this staff member'
@@ -177,13 +274,24 @@ export async function POST(request: NextRequest) {
     }
     
     // Handle invalid action
+    console.log(`Invalid action: ${action}`);
     return NextResponse.json({
       success: false,
       message: 'Invalid action. Use "start" or "end"'
     }, { status: 400 });
-    
   } catch (error) {
-    console.error('Error managing staff shift:', error);
-    return NextResponse.json({ error: 'Failed to manage staff shift' }, { status: 500 });
+    console.error(`Error in handleShiftAction: ${error.message}`);
+    throw error;
   }
+}
+
+// Helper function to format duration between two dates
+function formatDuration(start, end) {
+  const durationMs = end.getTime() - start.getTime();
+  
+  // Format as hours and minutes
+  const hours = Math.floor(durationMs / (1000 * 60 * 60));
+  const minutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
+  
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 } 

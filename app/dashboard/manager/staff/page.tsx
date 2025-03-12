@@ -29,14 +29,43 @@ export default function StaffManagement() {
   const [notification, setNotification] = useState({ show: false, message: '', type: '' });
   const [updatingStatus, setUpdatingStatus] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [openDropdown, setOpenDropdown] = useState(null);
+  const [shiftHistoryView, setShiftHistoryView] = useState('weekly'); // 'weekly' or 'monthly'
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (openDropdown && !event.target.closest('.dropdown-container')) {
+        setOpenDropdown(null);
+      }
+    };
+    
+    // Add passive option to improve performance
+    document.addEventListener('mousedown', handleClickOutside, { passive: true });
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [openDropdown]);
 
   // Define fetchStaffData outside useEffect so it's accessible throughout the component
   const fetchStaffData = async () => {
     try {
       setLoading(true);
       
-      // Fetch staff data from API
-      const response = await fetch('/api/manager/staff-data');
+      // Add a timeout to prevent hanging requests
+      const fetchPromise = fetch('/api/manager/staff-data');
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timeout')), 5000)
+      );
+      
+      // Race between fetch and timeout
+      const response = await Promise.race([fetchPromise, timeoutPromise]);
+      
+      // Make sure we have a valid Response object
+      if (!(response instanceof Response)) {
+        throw new Error('Invalid response received');
+      }
+      
       if (!response.ok) throw new Error('Failed to fetch staff data');
       const data = await response.json();
       
@@ -51,6 +80,8 @@ export default function StaffManagement() {
         staffCount: {
           total: 24,
           onDuty: 15,
+          onDutyToday: 15,
+          active: 24,
           byRole: {
             waiter: { total: 8, onDuty: 5 },
             chef: { total: 6, onDuty: 4 },
@@ -82,9 +113,14 @@ export default function StaffManagement() {
     // Fetch available users for the add staff modal
     const fetchUsers = async () => {
       try {
-        const response = await fetch('/api/users');
+        // Fetch users who are not already assigned to staff, including their role
+        const response = await fetch('/api/users?notInStaff=true');
         if (!response.ok) throw new Error('Failed to fetch users');
         const data = await response.json();
+        
+        // Log user data for debugging
+        console.log('Available users for staff assignment:', data);
+        
         setUsers(data);
       } catch (err) {
         console.error('Error fetching users:', err);
@@ -99,15 +135,62 @@ export default function StaffManagement() {
   const fetchStaffShifts = async (staffId) => {
     try {
       setLoadingShifts(true);
-      const response = await fetch(`/api/manager/staff-shifts?staffId=${staffId}`);
-      if (!response.ok) throw new Error('Failed to fetch shifts');
+      
+      console.log(`Fetching shifts for staff ID: ${staffId}`);
+      
+      // Make sure we have a valid staffId
+      if (!staffId) {
+        console.error('Invalid staffId in fetchStaffShifts:', staffId);
+        throw new Error('Invalid staff ID');
+      }
+      
+      // Add a timeout to prevent hanging requests
+      const fetchPromise = fetch(`/api/manager/staff-shifts?staffId=${staffId}`);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timeout')), 5000)
+      );
+      
+      // Race between fetch and timeout
+      const response = await Promise.race([fetchPromise, timeoutPromise]);
+      
+      // Make sure we have a valid Response object
+      if (!(response instanceof Response)) {
+        throw new Error('Invalid response received');
+      }
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('Error response from API:', errorData);
+        throw new Error(errorData.error || 'Failed to fetch shifts');
+      }
+      
       const data = await response.json();
-      setStaffShifts(data);
+      
+      // Process and format shift data
+      const processedShifts = data.shifts.map(shift => {
+        // Ensure shift has all required properties
+        return {
+          ...shift,
+          durationFormatted: shift.durationFormatted || 'In progress'
+        };
+      });
+      
+      setStaffShifts(processedShifts);
       setLoadingShifts(false);
     } catch (err) {
       console.error('Error fetching staff shifts:', err);
       setStaffShifts([]);
       setLoadingShifts(false);
+      
+      // Show an error notification
+      setNotification({
+        show: true,
+        message: `Failed to load shifts: ${err.message}`,
+        type: 'error'
+      });
+      
+      // Auto-dismiss notification
+      setTimeout(() => setNotification({ show: false, message: '', type: '' }), 3000);
     }
   };
   
@@ -146,9 +229,9 @@ export default function StaffManagement() {
         body: JSON.stringify({
           userId: newStaffData.userId,
           position: newStaffData.position,
-          hourlyRate: parseFloat(newStaffData.hourlyRate),
+          hourlyRate: parseFloat(newStaffData.hourlyRate) || 10.00,
           contactNumber: newStaffData.contactNumber || '(000) 000-0000',
-          address: newStaffData.address || 'No address provided',
+          address: newStaffData.address || 'Not provided',
           notes: newStaffData.notes
         }),
       });
@@ -207,6 +290,14 @@ export default function StaffManagement() {
       // Set updating status
       setUpdatingStatus(prev => ({ ...prev, [staffId]: true }));
       
+      console.log(`Attempting to ${action} shift for staff ID: ${staffId}`);
+      
+      // If we don't have a valid staffId, log an error and return
+      if (!staffId) {
+        console.error('Invalid staffId:', staffId);
+        throw new Error('Invalid staff ID');
+      }
+      
       // Send API request to start/end shift
       const response = await fetch('/api/manager/staff-shifts', {
         method: 'POST',
@@ -219,10 +310,21 @@ export default function StaffManagement() {
         }),
       });
       
-      const data = await response.json();
+      // Always read the response, even if it's an error
+      const responseText = await response.text();
+      let data;
+      
+      try {
+        data = JSON.parse(responseText);
+        console.log(`API response for ${action} shift:`, data);
+      } catch (parseError) {
+        console.error(`Error parsing JSON response: ${responseText}`);
+        throw new Error(`Invalid response from server: ${responseText}`);
+      }
       
       if (!response.ok) {
-        throw new Error(data.error || `Failed to ${action} shift`);
+        console.error(`Error response (${response.status}):`, data);
+        throw new Error(data.error || data.details || `Failed to ${action} shift`);
       }
       
       // Show success notification
@@ -264,19 +366,172 @@ export default function StaffManagement() {
     fetchStaffShifts(staff.id);
   };
   
-  // Handle input change for the add staff form
+  // Handle input changes in the add staff form
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setNewStaffData(prev => ({
-      ...prev,
-      [name]: value
-    }));
     
-    // If the user is selected, pre-fill the name
-    if (name === 'userId') {
+    // When userId changes, find the user and automatically set the position based on their role
+    if (name === 'userId' && value) {
       const selectedUser = users.find(user => user.id === value);
-      setSelectedUser(selectedUser);
+      if (selectedUser) {
+        // Map user role to position
+        let position = '';
+        switch(selectedUser.role) {
+          case 'MANAGER':
+            position = 'Manager';
+            break;
+          case 'WAITER':
+            position = 'Waiter';
+            break;
+          case 'KITCHEN':
+            position = 'Chef';
+            break;
+          case 'BAR':
+            position = 'Bartender';
+            break;
+          case 'RECEPTIONIST':
+            position = 'Host';
+            break;
+          case 'SHISHA':
+            position = 'Shisha';
+            break;
+          default:
+            position = selectedUser.role.charAt(0) + selectedUser.role.slice(1).toLowerCase();
+            break;
+        }
+        
+        // Update the form with the user's role and clear address & hourlyRate
+        setNewStaffData(prev => ({ 
+          ...prev, 
+          [name]: value,
+          position: position,
+          // Keep minimal defaults for hourlyRate and address
+          hourlyRate: '10.00',
+          address: ''
+        }));
+      }
+    } else {
+      // Normal input handling for other fields
+      setNewStaffData(prev => ({ 
+        ...prev, 
+        [name]: value 
+      }));
     }
+  };
+
+  // Calendar and date utility functions
+  const formatDate = (date) => {
+    if (!date) return '';
+    return new Date(date).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric'
+    });
+  };
+  
+  const formatTime = (date) => {
+    if (!date) return '';
+    return new Date(date).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+  };
+  
+  // Generate calendar days for the monthly view
+  const generateCalendarDays = (shifts) => {
+    const today = new Date();
+    const currentMonth = today.getMonth();
+    const currentYear = today.getFullYear();
+    
+    // Get the first day of the month
+    const firstDayOfMonth = new Date(currentYear, currentMonth, 1);
+    
+    // Get the last day of the month
+    const lastDayOfMonth = new Date(currentYear, currentMonth + 1, 0);
+    
+    // Get the day of the week the first day falls on (0 = Sunday, 6 = Saturday)
+    const firstDayOfWeek = firstDayOfMonth.getDay();
+    
+    // Get the last day of the previous month
+    const lastDayOfPreviousMonth = new Date(currentYear, currentMonth, 0).getDate();
+    
+    // Create array for calendar days
+    const calendarDays = [];
+    
+    // Add days from previous month to fill the first week
+    for (let i = firstDayOfWeek - 1; i >= 0; i--) {
+      const day = lastDayOfPreviousMonth - i;
+      const date = new Date(currentYear, currentMonth - 1, day);
+      
+      // Check if there's a shift on this day
+      const dayShift = shifts.find(shift => {
+        const shiftDate = new Date(shift.startTime);
+        return (
+          shiftDate.getDate() === date.getDate() && 
+          shiftDate.getMonth() === date.getMonth() && 
+          shiftDate.getFullYear() === date.getFullYear()
+        );
+      });
+      
+      calendarDays.push({
+        day,
+        isCurrentMonth: false,
+        isToday: false,
+        hasShift: !!dayShift,
+        shiftStatus: dayShift ? dayShift.status : null
+      });
+    }
+    
+    // Add days for current month
+    for (let day = 1; day <= lastDayOfMonth.getDate(); day++) {
+      const date = new Date(currentYear, currentMonth, day);
+      const isToday = day === today.getDate();
+      
+      // Check if there's a shift on this day
+      const dayShift = shifts.find(shift => {
+        const shiftDate = new Date(shift.startTime);
+        return (
+          shiftDate.getDate() === date.getDate() && 
+          shiftDate.getMonth() === date.getMonth() && 
+          shiftDate.getFullYear() === date.getFullYear()
+        );
+      });
+      
+      calendarDays.push({
+        day,
+        isCurrentMonth: true,
+        isToday,
+        hasShift: !!dayShift,
+        shiftStatus: dayShift ? dayShift.status : null
+      });
+    }
+    
+    // Add days from next month to complete the grid (6 rows x 7 days = 42 cells)
+    const remainingDays = 42 - calendarDays.length;
+    for (let day = 1; day <= remainingDays; day++) {
+      const date = new Date(currentYear, currentMonth + 1, day);
+      
+      // Check if there's a shift on this day
+      const dayShift = shifts.find(shift => {
+        const shiftDate = new Date(shift.startTime);
+        return (
+          shiftDate.getDate() === date.getDate() && 
+          shiftDate.getMonth() === date.getMonth() && 
+          shiftDate.getFullYear() === date.getFullYear()
+        );
+      });
+      
+      calendarDays.push({
+        day,
+        isCurrentMonth: false,
+        isToday: false,
+        hasShift: !!dayShift,
+        shiftStatus: dayShift ? dayShift.status : null
+      });
+    }
+    
+    return calendarDays;
   };
 
   // Display loading spinner while fetching data
@@ -332,12 +587,20 @@ export default function StaffManagement() {
               <h1 className="text-2xl font-semibold text-gray-800">Staff Management</h1>
             </div>
             <div className="mt-4 md:mt-0">
-              <button 
-                onClick={() => setShowAddStaffModal(true)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-              >
-                Add Staff Member
-              </button>
+              <div className="flex justify-between items-center">
+                <div className="flex-1 flex flex-col">
+                  <h1 className="text-2xl font-bold">Staff Management</h1>
+                  <p className="text-gray-600">Manage staff, track time, and monitor performance</p>
+                </div>
+                <div className="flex gap-3 items-center">
+                  <button
+                    onClick={() => setShowAddStaffModal(true)}
+                    className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                  >
+                    Add Staff Member
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -367,7 +630,7 @@ export default function StaffManagement() {
         )}
 
         {/* Staff Summary Cards */}
-        <div className="mb-8 grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="mb-8 grid grid-cols-1 md:grid-cols-2 gap-4">
           <StaffSummaryCard 
             title="Total Staff" 
             count={staffData.staffCount.total}
@@ -375,22 +638,10 @@ export default function StaffManagement() {
             color="blue"
           />
           <StaffSummaryCard 
-            title="On Duty" 
-            count={staffData.staffCount.onDuty}
+            title="Staff on Duty" 
+            count={staffData.staffCount.onDutyToday || staffData.staffCount.onDuty || 0}
             icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />}
             color="green"
-          />
-          <StaffSummaryCard 
-            title="Waiters" 
-            count={staffData.staffCount.byRole.waiter?.total || 0}
-            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />}
-            color="purple"
-          />
-          <StaffSummaryCard 
-            title="Chefs" 
-            count={staffData.staffCount.byRole.chef?.total || 0}
-            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />}
-            color="yellow"
           />
         </div>
 
@@ -490,28 +741,76 @@ export default function StaffManagement() {
                            employee.status === 'LATE' ? 'Late' : 'Off Duty'}
                         </span>
                       </div>
-                      <div className="ml-2 flex-shrink-0 flex">
-                        {employee.status === 'ACTIVE' ? (
+                      <div className="ml-2 flex-shrink-0 flex space-x-2">
+                        <div className="relative inline-block text-left dropdown-container">
                           <button
-                            onClick={() => handleShiftAction(employee.id, 'end')}
-                            disabled={updatingStatus[employee.id]}
-                            className={`px-3 py-1 text-xs rounded-md bg-red-600 text-white hover:bg-red-700 focus:outline-none ${updatingStatus[employee.id] ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            onClick={() => {
+                              // Toggle dropdown menu for this employee
+                              setSelectedStaff(employee);
+                              setOpenDropdown(openDropdown === employee.id ? null : employee.id);
+                            }}
+                            className="px-3 py-1 text-xs rounded-md bg-blue-600 text-white hover:bg-blue-700 focus:outline-none flex items-center"
                           >
-                            {updatingStatus[employee.id] ? 'Updating...' : 'End Shift'}
+                            Actions
+                            <svg className="ml-1 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
                           </button>
-                        ) : (
-                          <button
-                            onClick={() => handleShiftAction(employee.id, 'start')}
-                            disabled={updatingStatus[employee.id] || employee.status === 'COMPLETED'}
-                            className={`px-3 py-1 text-xs rounded-md ${
-                              employee.status === 'COMPLETED' 
-                                ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
-                                : 'bg-green-600 text-white hover:bg-green-700 focus:outline-none'
-                            } ${updatingStatus[employee.id] ? 'opacity-50 cursor-not-allowed' : ''}`}
-                          >
-                            {updatingStatus[employee.id] ? 'Updating...' : 'Start Shift'}
-                          </button>
-                        )}
+                          
+                          {/* Dropdown Menu */}
+                          {openDropdown === employee.id && (
+                            <div 
+                              className="origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10"
+                              role="menu"
+                              aria-orientation="vertical"
+                              aria-labelledby="options-menu"
+                            >
+                              <div className="py-1" role="none">
+                                {employee.status !== 'ACTIVE' && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleShiftAction(employee.id, 'start');
+                                      setOpenDropdown(null);
+                                    }}
+                                    className="w-full text-left block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 hover:text-gray-900"
+                                    role="menuitem"
+                                    disabled={updatingStatus[employee.id]}
+                                  >
+                                    {updatingStatus[employee.id] ? 'Starting...' : 'Start Shift'}
+                                  </button>
+                                )}
+                                
+                                {employee.status === 'ACTIVE' && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleShiftAction(employee.id, 'end');
+                                      setOpenDropdown(null);
+                                    }}
+                                    className="w-full text-left block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 hover:text-gray-900"
+                                    role="menuitem"
+                                    disabled={updatingStatus[employee.id]}
+                                  >
+                                    {updatingStatus[employee.id] ? 'Ending...' : 'End Shift'}
+                                  </button>
+                                )}
+                                
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openStaffDetail(employee);
+                                    setOpenDropdown(null);
+                                  }}
+                                  className="w-full text-left block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 hover:text-gray-900"
+                                  role="menuitem"
+                                >
+                                  View Details
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -589,15 +888,16 @@ export default function StaffManagement() {
                 </div>
                 <div className="mb-4">
                   <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="position">
-                    Position/Role
+                    Position/Role <span className="text-xs text-blue-600">(Auto-filled from user role)</span>
                   </label>
                   <select
                     id="position"
                     name="position"
-                    className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                    className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
                     value={newStaffData.position}
                     onChange={handleInputChange}
                     required
+                    disabled={!!newStaffData.userId} // Disable when user is selected
                   >
                     <option value="">Select position</option>
                     <option value="Waiter">Waiter</option>
@@ -608,10 +908,17 @@ export default function StaffManagement() {
                     <option value="Cleaner">Cleaner</option>
                     <option value="Shisha">Shisha</option>
                   </select>
+                  {newStaffData.userId && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      Position is automatically set based on the user's role
+                    </p>
+                  )}
                 </div>
+                
+                {/* Hourly Rate - Optional */}
                 <div className="mb-4">
                   <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="hourlyRate">
-                    Hourly Rate
+                    Hourly Rate <span className="text-xs text-gray-500">(Optional - Default: 10.00)</span>
                   </label>
                   <input
                     type="number"
@@ -622,13 +929,13 @@ export default function StaffManagement() {
                     className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
                     value={newStaffData.hourlyRate}
                     onChange={handleInputChange}
-                    required
                     placeholder="10.00"
                   />
                 </div>
+                
                 <div className="mb-4">
                   <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="contactNumber">
-                    Contact Number
+                    Contact Number <span className="text-xs text-gray-500">(Optional)</span>
                   </label>
                   <input
                     type="tel"
@@ -640,9 +947,11 @@ export default function StaffManagement() {
                     placeholder="(123) 456-7890"
                   />
                 </div>
+                
+                {/* Address - Optional */}
                 <div className="mb-4">
                   <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="address">
-                    Address
+                    Address <span className="text-xs text-gray-500">(Optional)</span>
                   </label>
                   <input
                     type="text"
@@ -651,7 +960,7 @@ export default function StaffManagement() {
                     className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
                     value={newStaffData.address}
                     onChange={handleInputChange}
-                    placeholder="123 Main St, City, Country"
+                    placeholder="Only if needed"
                   />
                 </div>
                 <div className="mb-4">
@@ -700,7 +1009,7 @@ export default function StaffManagement() {
         {/* Staff Detail Modal */}
         {showStaffDetailModal && selectedStaff && (
           <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-            <div className="relative top-20 mx-auto p-5 border max-w-xl shadow-lg rounded-md bg-white">
+            <div className="relative top-20 mx-auto p-5 border max-w-3xl shadow-lg rounded-md bg-white">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-medium text-gray-900">Staff Details</h3>
                 <button onClick={() => setShowStaffDetailModal(false)} className="text-gray-400 hover:text-gray-500">
@@ -741,8 +1050,107 @@ export default function StaffManagement() {
                 </div>
               </div>
               
+              {/* Attendance Stats Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
+                  <h4 className="text-sm font-semibold text-gray-600">Current Week</h4>
+                  <div className="mt-2">
+                    <p className="text-2xl font-bold text-gray-900">
+                      {staffShifts.filter(shift => {
+                        const shiftDate = new Date(shift.startTime);
+                        const today = new Date();
+                        const startOfWeek = new Date(today.setDate(today.getDate() - today.getDay()));
+                        startOfWeek.setHours(0, 0, 0, 0);
+                        return shiftDate >= startOfWeek;
+                      }).length} shifts
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {staffShifts.filter(shift => {
+                        const shiftDate = new Date(shift.startTime);
+                        const today = new Date();
+                        const startOfWeek = new Date(today.setDate(today.getDate() - today.getDay()));
+                        startOfWeek.setHours(0, 0, 0, 0);
+                        return shiftDate >= startOfWeek && shift.status === 'COMPLETED';
+                      }).length} completed
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
+                  <h4 className="text-sm font-semibold text-gray-600">Current Month</h4>
+                  <div className="mt-2">
+                    <p className="text-2xl font-bold text-gray-900">
+                      {staffShifts.filter(shift => {
+                        const shiftDate = new Date(shift.startTime);
+                        const today = new Date();
+                        const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+                        return shiftDate >= startOfMonth;
+                      }).length} shifts
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {Math.round((staffShifts.filter(shift => {
+                        const shiftDate = new Date(shift.startTime);
+                        const today = new Date();
+                        const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+                        return shiftDate >= startOfMonth && shift.status === 'COMPLETED';
+                      }).length / Math.max(1, staffShifts.filter(shift => {
+                        const shiftDate = new Date(shift.startTime);
+                        const today = new Date();
+                        const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+                        return shiftDate >= startOfMonth;
+                      }).length)) * 100)}% completion rate
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
+                  <h4 className="text-sm font-semibold text-gray-600">All Time</h4>
+                  <div className="mt-2">
+                    <p className="text-2xl font-bold text-gray-900">
+                      {staffShifts.length} shifts
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      Since {staffShifts.length > 0 ? 
+                        new Date(staffShifts[staffShifts.length - 1].startTime).toLocaleDateString() : 
+                        'N/A'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              
               <div className="border-t border-gray-200 pt-4">
-                <h4 className="text-md font-medium text-gray-900 mb-3">Shift History</h4>
+                <div className="flex justify-between items-center mb-3">
+                  <h4 className="text-md font-medium text-gray-900">Shift History</h4>
+                  <div className="flex items-center space-x-3">
+                    <div className="text-xs text-gray-500 mr-2">
+                      {staffShifts.filter(s => s.status === 'COMPLETED').length} completed, 
+                      {staffShifts.filter(s => s.status === 'LATE').length} late,
+                      {staffShifts.filter(s => s.status === 'ACTIVE').length} active
+                    </div>
+                    <div className="flex bg-gray-200 rounded-md p-1">
+                      <button
+                        className={`text-xs px-3 py-1 rounded-md ${
+                          shiftHistoryView === 'weekly' 
+                            ? 'bg-blue-600 text-white' 
+                            : 'text-gray-700 hover:bg-gray-300'
+                        }`}
+                        onClick={() => setShiftHistoryView('weekly')}
+                      >
+                        Weekly
+                      </button>
+                      <button
+                        className={`text-xs px-3 py-1 rounded-md ${
+                          shiftHistoryView === 'monthly' 
+                            ? 'bg-blue-600 text-white' 
+                            : 'text-gray-700 hover:bg-gray-300'
+                        }`}
+                        onClick={() => setShiftHistoryView('monthly')}
+                      >
+                        Monthly
+                      </button>
+                    </div>
+                  </div>
+                </div>
                 
                 {loadingShifts ? (
                   <div className="text-center py-4">
@@ -750,36 +1158,155 @@ export default function StaffManagement() {
                     <p className="text-gray-500 text-sm">Loading shift data...</p>
                   </div>
                 ) : staffShifts.length > 0 ? (
-                  <ul className="divide-y divide-gray-200">
-                    {staffShifts.map(shift => (
-                      <li key={shift.id} className="py-3">
-                        <div className="flex justify-between">
-                          <div>
-                            <p className="text-sm font-medium text-gray-900">
-                              {new Date(shift.startTime).toLocaleDateString()} {" "}
-                              {new Date(shift.startTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                              {shift.endTime ? 
-                                ` - ${new Date(shift.endTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}` : 
-                                ' - Present'}
-                            </p>
-                            <p className="text-xs text-gray-500 mt-1">
-                              Duration: {shift.durationFormatted}
-                            </p>
-                          </div>
-                          <div>
-                            <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                              shift.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 
-                              shift.status === 'COMPLETED' ? 'bg-blue-100 text-blue-800' : 
-                              shift.status === 'LATE' ? 'bg-yellow-100 text-yellow-800' : 
-                              'bg-gray-100 text-gray-800'
-                            }`}>
-                              {shift.status}
-                            </span>
+                  <div>
+                    {/* View based on the selected view type */}
+                    {shiftHistoryView === 'weekly' ? (
+                      /* Weekly Time Bar */
+                      <div className="mb-6">
+                        <h5 className="text-sm font-medium text-gray-700 mb-2">This Week's Schedule</h5>
+                        <div className="bg-gray-100 rounded-lg p-3">
+                          <div className="grid grid-cols-7 gap-1">
+                            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, index) => {
+                              const today = new Date();
+                              const currentWeekDay = new Date();
+                              currentWeekDay.setDate(today.getDate() - today.getDay() + index);
+                              
+                              // Check if there's a shift on this day
+                              const dayShift = staffShifts.find(shift => {
+                                const shiftDate = new Date(shift.startTime);
+                                return shiftDate.getDate() === currentWeekDay.getDate() && 
+                                       shiftDate.getMonth() === currentWeekDay.getMonth() &&
+                                       shiftDate.getFullYear() === currentWeekDay.getFullYear();
+                              });
+                              
+                              return (
+                                <div key={day} className="text-center">
+                                  <div className="text-xs font-medium mb-1">{day}</div>
+                                  <div className={`text-xs ${today.getDay() === index ? 'font-bold' : ''}`}>
+                                    {currentWeekDay.getDate()}
+                                  </div>
+                                  <div className={`h-3 mt-1 rounded-full ${
+                                    dayShift ? 
+                                      dayShift.status === 'COMPLETED' ? 'bg-green-500' : 
+                                      dayShift.status === 'LATE' ? 'bg-yellow-500' : 
+                                      dayShift.status === 'ACTIVE' ? 'bg-blue-500' : 'bg-gray-300'
+                                    : 'bg-gray-200'
+                                  }`}></div>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
-                      </li>
-                    ))}
-                  </ul>
+                      </div>
+                    ) : (
+                      /* Monthly Calendar View */
+                      <div className="mb-6">
+                        <h5 className="text-sm font-medium text-gray-700 mb-2">This Month's Overview</h5>
+                        <div className="bg-gray-100 rounded-lg p-3">
+                          <div className="mb-2 text-center">
+                            <span className="text-sm font-medium">
+                              {new Date().toLocaleString('default', { month: 'long' })} {new Date().getFullYear()}
+                            </span>
+                          </div>
+                          
+                          {/* Calendar header */}
+                          <div className="grid grid-cols-7 gap-1 mb-1">
+                            {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, index) => (
+                              <div key={index} className="text-xs text-center font-medium text-gray-500">
+                                {day}
+                              </div>
+                            ))}
+                          </div>
+                          
+                          {/* Calendar grid */}
+                          <div className="grid grid-cols-7 gap-1">
+                            {generateCalendarDays(staffShifts).map((day, index) => (
+                              <div 
+                                key={index} 
+                                className={`text-center py-1 text-xs ${
+                                  day.isCurrentMonth ? '' : 'text-gray-400'
+                                } ${
+                                  day.isToday ? 'bg-blue-100 font-bold' : ''
+                                }`}
+                              >
+                                <div>{day.day}</div>
+                                {day.hasShift && (
+                                  <div 
+                                    className={`h-2 w-2 mx-auto mt-1 rounded-full ${
+                                      day.shiftStatus === 'COMPLETED' ? 'bg-green-500' : 
+                                      day.shiftStatus === 'LATE' ? 'bg-yellow-500' : 
+                                      day.shiftStatus === 'ACTIVE' ? 'bg-blue-500' : 'bg-gray-300'
+                                    }`}
+                                  ></div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Shift List - Always show regardless of weekly/monthly view */}
+                    <ul className="divide-y divide-gray-200">
+                      {staffShifts.map(shift => (
+                        <li key={shift.id} className="py-3">
+                          <div className="flex justify-between">
+                            <div>
+                              <p className="text-sm font-medium text-gray-900">
+                                {new Date(shift.startTime).toLocaleDateString()} {" "}
+                                {new Date(shift.startTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                {shift.endTime ? 
+                                  ` - ${new Date(shift.endTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}` : 
+                                  ' - Present'}
+                              </p>
+                              <p className="text-xs text-gray-500 mt-1">
+                                Duration: {shift.durationFormatted || 'In progress'}
+                              </p>
+                              
+                              {/* Time bar visualization */}
+                              <div className="mt-2 relative pt-1">
+                                <div className="flex mb-2 items-center justify-between">
+                                  <div>
+                                    <span className="text-xs font-semibold inline-block text-gray-600">
+                                      Shift Progress
+                                    </span>
+                                  </div>
+                                  <div className="text-right">
+                                    <span className="text-xs font-semibold inline-block text-gray-600">
+                                      {shift.endTime ? '100%' : 'In progress'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="overflow-hidden h-2 mb-4 text-xs flex rounded bg-gray-200">
+                                  <div 
+                                    style={{ 
+                                      width: shift.endTime ? '100%' : '50%',
+                                      transition: 'width 1s ease-in-out'
+                                    }} 
+                                    className={`shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center ${
+                                      shift.status === 'COMPLETED' ? 'bg-green-500' : 
+                                      shift.status === 'LATE' ? 'bg-yellow-500' : 
+                                      shift.status === 'ACTIVE' ? 'bg-blue-500' : 'bg-gray-400'
+                                    }`}
+                                  ></div>
+                                </div>
+                              </div>
+                            </div>
+                            <div>
+                              <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                                shift.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 
+                                shift.status === 'COMPLETED' ? 'bg-blue-100 text-blue-800' : 
+                                shift.status === 'LATE' ? 'bg-yellow-100 text-yellow-800' : 
+                                'bg-gray-100 text-gray-800'
+                              }`}>
+                                {shift.status}
+                              </span>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 ) : (
                   <p className="text-gray-500 text-center py-4">No shift history available</p>
                 )}
@@ -815,4 +1342,7 @@ function StaffSummaryCard({ title, count, icon, color }) {
       </div>
     </div>
   );
-} 
+}
+
+// Memoize the component to prevent unnecessary re-renders
+StaffSummaryCard = React.memo(StaffSummaryCard); 

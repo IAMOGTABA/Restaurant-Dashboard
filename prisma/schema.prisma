@@ -12,48 +12,57 @@ datasource db {
 
 // User models
 model User {
-  id             String          @id @default(uuid())
-  username       String          @unique
-  name           String
-  email          String          @unique
-  password       String
-  role           String          @default("MANAGER") // Values: "OWNER", "MANAGER", "KITCHEN", "BAR", "WAITER", "RECEPTIONIST", "SHISHA"
-  active         Boolean         @default(true)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  createdBy      String?
-  reservations   Reservation[]
-  orders         Order[]
-  staff          Staff?
-  notifications  Notification[]
+  id        String   @id @default(uuid())
+  username  String   @unique
+  name      String
+  email     String   @unique
+  password  String
+  role      String   @default("MANAGER") // Values: "OWNER", "MANAGER", "KITCHEN", "BAR", "WAITER", "RECEPTIONIST", "SHISHA"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+
+  // New hierarchical relationship fields
+  parentId    String? // ID of the parent user (null for top-level users)
+  parent      User?   @relation("UserHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children    User[]  @relation("UserHierarchy")
+  isGroupHead Boolean @default(false) // Whether this user is a group head (e.g., main "Waiter" user)
+  groupRole   String? // The role of the group this user belongs to
+
+  // Existing relations
+  reservations  Reservation[]
+  orders        Order[]
+  staff         Staff?
+  notifications Notification[]
 }
 
 // Staff management
 model Staff {
-  id            String         @id @default(uuid())
-  userId        String         @unique
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id            String        @id @default(uuid())
+  userId        String        @unique
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   position      String
   hourlyRate    Float
   hireDate      DateTime
   contactNumber String
   address       String
-  shifts        Shift[]
   performance   Performance[]
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  Shift         Shift[]
 }
 
 model Shift {
-  id        String    @id @default(uuid())
+  id        String   @id @default(uuid())
   staffId   String
-  staff     Staff     @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  staff     Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
   startTime DateTime
-  endTime   DateTime
-  status    String    @default("SCHEDULED") // Values: "SCHEDULED", "COMPLETED", "ABSENT", "LATE"
+  endTime   DateTime?
+  status    String   @default("SCHEDULED") // Values: "SCHEDULED", "COMPLETED", "ABSENT", "LATE", "ACTIVE"
   notes     String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Performance {
@@ -82,46 +91,47 @@ model Table {
 
 // Reservation system
 model Reservation {
-  id                String      @id @default(uuid())
-  userId            String
-  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tableId           String
-  table             Table       @relation(fields: [tableId], references: [id], onDelete: Cascade)
-  dateTime          DateTime
-  guestCount        Int
-  status            String      @default("CONFIRMED") // Values: "PENDING", "CONFIRMED", "CANCELLED", "COMPLETED", "NO_SHOW"
-  specialRequests   String?
-  contactNumber     String
-  customerName      String
-  confirmationSent  Boolean     @default(false)
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tableId          String
+  table            Table    @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  dateTime         DateTime
+  guestCount       Int
+  status           String   @default("CONFIRMED") // Values: "PENDING", "CONFIRMED", "CANCELLED", "COMPLETED", "NO_SHOW"
+  specialRequests  String?
+  contactNumber    String
+  customerName     String
+  confirmationSent Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
 
 // Menu management
 model Category {
-  id          String       @id @default(uuid())
+  id          String     @id @default(uuid())
   name        String
   description String?
   menuItems   MenuItem[]
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 }
 
 model MenuItem {
-  id          String         @id @default(uuid())
+  id          String       @id @default(uuid())
   name        String
   description String?
   price       Float
   categoryId  String
-  category    Category       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  category    Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   image       String?
-  isAvailable Boolean        @default(true)
-  popular     Boolean        @default(false)
+  isAvailable Boolean      @default(true)
+  popular     Boolean      @default(false)
+  metadata    String?      // JSON string for storing display options and other metadata
   ingredients Ingredient[]
   orderItems  OrderItem[]
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 }
 
 // Inventory management
@@ -153,7 +163,7 @@ model IngredientUsage {
   ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
   date         DateTime
   amount       Float
-  type         String     // Values: "INVENTORY_ADDITION", "RECIPE_USAGE", "WASTE", "ADJUSTMENT"
+  type         String // Values: "INVENTORY_ADDITION", "RECIPE_USAGE", "WASTE", "ADJUSTMENT"
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 }
@@ -172,36 +182,36 @@ model Supplier {
 
 // Order management
 model Order {
-  id            String       @id @default(uuid())
+  id            String      @id @default(uuid())
   userId        String
-  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   tableId       String?
-  table         Table?       @relation(fields: [tableId], references: [id])
-  status        String       @default("PENDING") // Values: "PENDING", "IN_PROGRESS", "READY", "COMPLETED", "CANCELLED"
-  type          String       @default("DINE_IN") // Values: "DINE_IN", "TAKEOUT", "DELIVERY"
+  table         Table?      @relation(fields: [tableId], references: [id])
+  status        String      @default("PENDING") // Values: "PENDING", "IN_PROGRESS", "READY", "COMPLETED", "CANCELLED"
+  type          String      @default("DINE_IN") // Values: "DINE_IN", "TAKEOUT", "DELIVERY"
   items         OrderItem[]
   total         Float
   tax           Float
   paidAmount    Float?
-  paymentStatus String       @default("PENDING") // Values: "PENDING", "PAID", "PARTIALLY_PAID", "REFUNDED"
+  paymentStatus String      @default("PENDING") // Values: "PENDING", "PAID", "PARTIALLY_PAID", "REFUNDED"
   paymentMethod String?
   notes         String?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 }
 
 model OrderItem {
-  id          String    @id @default(uuid())
-  orderId     String
-  order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  menuItemId  String
-  menuItem    MenuItem  @relation(fields: [menuItemId], references: [id])
-  quantity    Int
-  price       Float
-  notes       String?
-  status      String    @default("PENDING") // Values: "PENDING", "PREPARING", "READY", "SERVED", "CANCELLED"
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id         String   @id @default(uuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+  quantity   Int
+  price      Float
+  notes      String?
+  status     String   @default("PENDING") // Values: "PENDING", "PREPARING", "READY", "SERVED", "CANCELLED"
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 // Notification system
@@ -212,7 +222,7 @@ model Notification {
   title     String
   message   String
   read      Boolean  @default(false)
-  type      String   // Values: "ORDER", "RESERVATION", "INVENTORY", "STAFF", "SYSTEM"
+  type      String // Values: "ORDER", "RESERVATION", "INVENTORY", "STAFF", "SYSTEM"
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-} 
+}

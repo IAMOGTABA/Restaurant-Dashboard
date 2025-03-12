@@ -139,7 +139,7 @@ export default function LoginPage() {
                 </label>
               </div>
             </div>
-            
+
             <button
               type="submit"
               disabled={isLoading}
@@ -148,7 +148,7 @@ export default function LoginPage() {
               {isLoading ? 'Signing in...' : 'Sign in'}
             </button>
           </div>
-          
+            
           <div className="mt-8 text-center">
             <p className="text-sm text-gray-600">
               Demo accounts:
